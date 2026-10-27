@@ -24,3 +24,15 @@ Xbox 360 homebrew test program that checks whether the console can make a generi
 - **Red**: the console returned an error when trying to vibrate.
 
 Green without vibration means the command left the console but the controller did not react.
+
+## Spy plugin (`Plugin/`)
+
+Dashlaunch plugin that **changes nothing**: it only logs what games ask the console about the controller, and every vibration request.
+
+1. Open an XDK command prompt in the `Plugin` folder and run `build_plugin.bat`. You get `Controller360Spy.xex`.
+2. Copy it to the USB drive and add it to `launch.ini`, e.g. `plugin4 = Usb:\Controller360Spy.xex`.
+3. Restart the console and play a game that vibrates for a while: first with the original controller, then with the generic one.
+4. Download `Controller360Spy.log` over FTP from the root of the hard drive (or the USB drive if there is no hard drive).
+5. To remove it, delete the line from `launch.ini` and restart.
+
+A line identical to the previous one is not repeated, and logging stops at 5000 lines.
