@@ -39,6 +39,9 @@ EXTERN_C {
     VOID RtlInitAnsiString(PSTRING Dest, const char* Source);
     LONG ObCreateSymbolicLink(PSTRING Link, PSTRING Device);
     LONG ObDeleteSymbolicLink(PSTRING Link);
+    DWORD ExCreateThread(PHANDLE Handle, DWORD StackSize, LPDWORD ThreadId, PVOID ApiStartup,
+                         LPTHREAD_START_ROUTINE StartAddress, LPVOID Parameter, DWORD Flags);
+    VOID XapiThreadStartup(VOID (__cdecl *StartRoutine)(VOID*), VOID* Context, DWORD Unknown);
     DWORD XexGetModuleHandle(PSZ Name, PHANDLE Handle);
     DWORD XexGetProcedureAddress(HANDLE Handle, DWORD Ordinal, PVOID Address);
     extern PXBOX_KRNL_VERSION XboxKrnlVersion;
@@ -79,25 +82,66 @@ static BOOL MountLogDevice()
     return FALSE;
 }
 
-static void WriteLine(const char* text)
+// Abrir, escribir y cerrar cada vez: asi el archivo queda bien guardado
+// aunque el juego se cierre o la consola se congele.
+static void AppendToFile(const char* text, DWORD len)
 {
-    DbgPrint("%s", text);
-    if (!g_logReady || g_lines > MAX_LINES)
-        return;
-    if (g_lines == MAX_LINES)
-        text = "--- limite de lineas alcanzado, ya no se anota mas ---\n";
-
-    // Abrir, escribir y cerrar cada vez: asi el archivo queda bien guardado
-    // aunque el juego se cierre o la consola se congele.
     HANDLE h = CreateFile(LOG_PATH, GENERIC_WRITE, FILE_SHARE_READ, NULL,
                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE)
         return;
     SetFilePointer(h, 0, NULL, FILE_END);
     DWORD written;
-    WriteFile(h, text, (DWORD)strlen(text), &written, NULL);
+    WriteFile(h, text, len, &written, NULL);
     CloseHandle(h);
+}
+
+// Lineas guardadas en memoria mientras el disco todavia no esta listo.
+static char  g_pending[4096];
+static DWORD g_pendingLen = 0;
+
+static void WriteLine(const char* text)
+{
+    DbgPrint("%s", text);
+    if (g_lines > MAX_LINES)
+        return;
+    if (g_lines == MAX_LINES)
+        text = "--- limite de lineas alcanzado, ya no se anota mas ---\n";
     g_lines++;
+
+    DWORD len = (DWORD)strlen(text);
+    if (g_logReady)
+        AppendToFile(text, len);
+    else if (g_pendingLen + len <= sizeof(g_pending))
+    {
+        memcpy(g_pending + g_pendingLen, text, len);
+        g_pendingLen += len;
+    }
+}
+
+static void Log(const char* fmt, ...);
+
+// Hilo aparte: al arrancar la consola el disco puede no estar listo todavia,
+// asi que reintenta cada segundo durante 2 minutos y luego vuelca lo guardado.
+static DWORD WINAPI MountRetryThread(LPVOID)
+{
+    for (int s = 1; s <= 120; s++)
+    {
+        Sleep(1000);
+        EnterCriticalSection(&g_lock);
+        if (MountLogDevice())
+        {
+            g_logReady = TRUE;
+            AppendToFile(g_pending, g_pendingLen);
+            g_pendingLen = 0;
+            LeaveCriticalSection(&g_lock);
+            Log("Log listo despues de %d s\n", s);
+            return 0;
+        }
+        LeaveCriticalSection(&g_lock);
+    }
+    DbgPrint("Controller360Spy | no se pudo crear el log\n");
+    return 0;
 }
 
 static void Log(const char* fmt, ...)
@@ -201,6 +245,16 @@ BOOL APIENTRY DllMain(HANDLE hInstDLL, DWORD dwReason, LPVOID lpReserved)
 
     InitializeCriticalSection(&g_lock);
     g_logReady = MountLogDevice();
+    if (!g_logReady)
+    {
+        // Hilo de sistema (flag 2) para que no se cierre al cambiar de juego.
+        HANDLE hThread = NULL;
+        DWORD tid;
+        ExCreateThread(&hThread, 0, &tid, (PVOID)XapiThreadStartup,
+                       (LPTHREAD_START_ROUTINE)MountRetryThread, NULL, 2);
+        if (hThread)
+            CloseHandle(hThread);
+    }
     Log("=== Controller360Spy, kernel %u, build %s %s ===\n",
         XboxKrnlVersion->Build, __DATE__, __TIME__);
 
